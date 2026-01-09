@@ -71,7 +71,7 @@ answer_callback_query() {
     local text="$2"
     local show_alert="${3:-false}"
 
-    timeout 5 curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/answerCallbackQuery" \
+    timeout 10 curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/answerCallbackQuery" \
         -H "Content-Type: application/json" \
         -d "{
             \"callback_query_id\": \"$callback_query_id\",
@@ -121,6 +121,16 @@ get_updates() {
             \"timeout\": $poll_timeout,
             \"allowed_updates\": [\"callback_query\"]
         }" 2>/dev/null || echo '{"ok":false}'
+}
+
+warmup_api() {
+    # Pre-establish HTTPS connection to Telegram API
+    # This ensures first callback response is fast (DNS, TLS already done)
+    log "INFO" "Warming up Telegram API connection..."
+    timeout 10 curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe" \
+        -H "Content-Type: application/json" >/dev/null 2>&1 && \
+        log "INFO" "API warmup successful" || \
+        log "WARN" "API warmup failed (will retry on first request)"
 }
 
 #===============================================================================
@@ -354,10 +364,11 @@ process_callback() {
             ip=$(echo "$data" | cut -d: -f2)
             target_server=$(echo "$data" | cut -d: -f3)
 
-            # Only process if for this server
-            if [[ "$target_server" != "$SERVER_NAME" ]]; then
+            # Only process if for this server (skip if target specified and doesn't match)
+            if [[ -n "$target_server" ]] && [[ "$target_server" != "$SERVER_NAME" ]]; then
                 log "INFO" "Block request not for this server (target: $target_server)"
-                return 1
+                # Don't answer - let the correct server handle it
+                return 0
             fi
 
             local exit_code=0
@@ -391,10 +402,11 @@ process_callback() {
             ip=$(echo "$data" | cut -d: -f2)
             target_server=$(echo "$data" | cut -d: -f3)
 
-            # Only process if for this server
-            if [[ "$target_server" != "$SERVER_NAME" ]]; then
+            # Only process if for this server (skip if target specified and doesn't match)
+            if [[ -n "$target_server" ]] && [[ "$target_server" != "$SERVER_NAME" ]]; then
                 log "INFO" "Unblock request not for this server (target: $target_server)"
-                return 1
+                # Don't answer - let the correct server handle it
+                return 0
             fi
 
             local exit_code=0
@@ -445,9 +457,11 @@ process_callback() {
             local target_server
             target_server=$(echo "$data" | cut -d: -f2)
 
-            if [[ "$target_server" != "$SERVER_NAME" ]]; then
+            # Only process if for this server (skip if target specified and doesn't match)
+            if [[ -n "$target_server" ]] && [[ "$target_server" != "$SERVER_NAME" ]]; then
                 log "INFO" "Sessions request not for this server (target: $target_server)"
-                return 1
+                # Don't answer - let the correct server handle it
+                return 0
             fi
 
             local session_count
@@ -500,6 +514,9 @@ start_daemon() {
     log "INFO" "Starting callback handler (PID: $$)"
     echo "Callback handler started with PID $$"
 
+    # Warmup API connection (pre-establish HTTPS for faster first response)
+    warmup_api
+
     local offset
     offset=$(get_last_offset)
 
@@ -551,7 +568,7 @@ except Exception as e:
         fi
 
         while IFS='|' read -r update_id cb_id cb_data chat_id from_id; do
-            if [[ -n "$update_id" ]] && [[ "$update_id" =~ ^[0-9]+$ ]] && [[ "$update_id" -gt "$offset" ]]; then
+            if [[ -n "$update_id" ]] && [[ "$update_id" =~ ^[0-9]+$ ]] && [[ "$update_id" -ge "$offset" ]]; then
                 offset=$((update_id + 1))
                 save_offset "$offset"
 
