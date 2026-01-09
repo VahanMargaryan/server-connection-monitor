@@ -3,7 +3,7 @@
 # Server Connection Monitor - Telegram Callback Handler
 #
 # Long-polling daemon that processes inline keyboard button presses
-# Handles: Block IP, Kick User, Show Sessions
+# Handles: Block IP, Unblock IP, Kick User, Show Sessions
 #
 # License: MIT
 #===============================================================================
@@ -94,6 +94,22 @@ send_message() {
         }" >/dev/null 2>&1 || log "WARN" "Failed to send message"
 }
 
+send_message_with_keyboard() {
+    local text="$1"
+    local keyboard="$2"
+    local escaped_text
+    escaped_text=$(echo "$text" | json_escape)
+
+    timeout 10 curl -sS -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+        -H "Content-Type: application/json" \
+        -d "{
+            \"chat_id\": \"${TELEGRAM_CHAT_ID}\",
+            \"text\": ${escaped_text},
+            \"parse_mode\": \"HTML\",
+            \"reply_markup\": $keyboard
+        }" >/dev/null 2>&1 || log "WARN" "Failed to send message with keyboard"
+}
+
 get_updates() {
     local offset="$1"
     local poll_timeout="${2:-10}"
@@ -161,6 +177,59 @@ block_ip() {
     else
         log "ERROR" "Failed to block IP: $ip"
         return 4
+    fi
+}
+
+unblock_ip() {
+    local ip="$1"
+
+    log "INFO" "Unblocking IP: $ip"
+
+    # Validate IP format (IPv4 or IPv6)
+    if ! [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && \
+       ! [[ "$ip" =~ ^[0-9a-fA-F:]+$ ]]; then
+        log "ERROR" "Invalid IP format: $ip"
+        return 2
+    fi
+
+    local unblocked=0
+
+    # Remove from iptables
+    if iptables -C INPUT -s "$ip" -j DROP 2>/dev/null; then
+        if iptables -D INPUT -s "$ip" -j DROP 2>&1; then
+            log "INFO" "Removed iptables rule for IP: $ip"
+            ((unblocked++))
+        fi
+    fi
+
+    # Save iptables rules
+    if [[ $unblocked -gt 0 ]]; then
+        if command -v netfilter-persistent &>/dev/null; then
+            netfilter-persistent save 2>/dev/null || true
+        elif command -v iptables-save &>/dev/null; then
+            mkdir -p /etc/iptables
+            iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
+        fi
+    fi
+
+    # Remove from hosts.deny
+    if grep -q "ALL: $ip" /etc/hosts.deny 2>/dev/null; then
+        sed -i "/ALL: $ip/d" /etc/hosts.deny
+        log "INFO" "Removed from hosts.deny: $ip"
+        ((unblocked++))
+    fi
+
+    # Remove from fail2ban if available
+    if command -v fail2ban-client &>/dev/null; then
+        fail2ban-client set sshd unbanip "$ip" 2>/dev/null || true
+    fi
+
+    if [[ $unblocked -gt 0 ]]; then
+        log "INFO" "Successfully unblocked IP: $ip"
+        return 0
+    else
+        log "WARN" "IP was not blocked: $ip"
+        return 3
     fi
 }
 
@@ -297,7 +366,44 @@ process_callback() {
             case $exit_code in
                 0)
                     answer_callback_query "$callback_query_id" "IP $ip blocked on $SERVER_NAME" true
-                    send_message "🚫 <b>IP Blocked</b>
+                    local unblock_keyboard="{\"inline_keyboard\":[[{\"text\":\"✅ Unblock IP\",\"callback_data\":\"unblock:$ip:$SERVER_NAME\"}]]}"
+                    send_message_with_keyboard "🚫 <b>IP Blocked</b>
+
+🖥️ Server: <code>$SERVER_NAME</code>
+📡 IP: <code>$ip</code>
+🕐 Time: $(date '+%Y-%m-%d %H:%M:%S')
+👤 By: User $from_id" "$unblock_keyboard"
+                    ;;
+                2)
+                    answer_callback_query "$callback_query_id" "Invalid IP format" true
+                    ;;
+                3)
+                    answer_callback_query "$callback_query_id" "IP already blocked" true
+                    ;;
+                *)
+                    answer_callback_query "$callback_query_id" "Failed to block IP (error: $exit_code)" true
+                    ;;
+            esac
+            ;;
+
+        unblock)
+            local ip target_server
+            ip=$(echo "$data" | cut -d: -f2)
+            target_server=$(echo "$data" | cut -d: -f3)
+
+            # Only process if for this server
+            if [[ "$target_server" != "$SERVER_NAME" ]]; then
+                log "INFO" "Unblock request not for this server (target: $target_server)"
+                return 1
+            fi
+
+            local exit_code=0
+            unblock_ip "$ip" || exit_code=$?
+
+            case $exit_code in
+                0)
+                    answer_callback_query "$callback_query_id" "IP $ip unblocked on $SERVER_NAME" true
+                    send_message "✅ <b>IP Unblocked</b>
 
 🖥️ Server: <code>$SERVER_NAME</code>
 📡 IP: <code>$ip</code>
@@ -308,10 +414,10 @@ process_callback() {
                     answer_callback_query "$callback_query_id" "Invalid IP format" true
                     ;;
                 3)
-                    answer_callback_query "$callback_query_id" "IP already blocked" true
+                    answer_callback_query "$callback_query_id" "IP was not blocked" true
                     ;;
                 *)
-                    answer_callback_query "$callback_query_id" "Failed to block IP (error: $exit_code)" true
+                    answer_callback_query "$callback_query_id" "Failed to unblock IP (error: $exit_code)" true
                     ;;
             esac
             ;;

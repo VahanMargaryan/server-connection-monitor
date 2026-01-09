@@ -1,13 +1,13 @@
 # Server Connection Monitor
 
-Real-time Telegram notifications for SSH and server connections with inline action buttons to block IPs or kick users directly from your phone.
+Real-time Telegram notifications for SSH and server connections with inline action buttons to block/unblock IPs or kick users directly from your phone.
 
 ## Features
 
 - **Real-time Alerts** - Instant Telegram notifications when someone connects
 - **Geo-location** - See where connections originate
 - **Multiple Connection Types** - SSH, tunnels, rsync, SCP, SFTP, local logins
-- **Inline Actions** - Block IP or kick user directly from Telegram
+- **Inline Actions** - Block/unblock IP or kick user directly from Telegram
 - **Multi-server Support** - Deploy on multiple servers with unique identification
 - **Security Integration** - Works with iptables, hosts.deny, and fail2ban
 
@@ -134,6 +134,13 @@ DEBUG="false"               # Enable debug logging
 - Adds to `/etc/hosts.deny`
 - Integrates with fail2ban if installed
 - Rules persist across reboots
+- Shows "Unblock IP" button after blocking
+
+### ✅ Unblock IP
+- Removes IP from iptables DROP rule
+- Removes from `/etc/hosts.deny`
+- Unbans from fail2ban if installed
+- Available after blocking an IP
 
 ### 👢 Kick User
 - Terminates active sessions via loginctl
