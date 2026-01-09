@@ -306,33 +306,176 @@ kick_user() {
 }
 
 get_active_sessions() {
-    local sessions=""
-    local count=0
+    local output=""
+    local total_count=0
+
+    # Section 1: Interactive Sessions (using 'w' for more details)
+    output+="<b>👥 Interactive Sessions:</b>
+"
+    local interactive_count=0
 
     while IFS= read -r line; do
-        if [[ -n "$line" ]]; then
-            local sess_user sess_tty sess_from
-            sess_user=$(echo "$line" | awk '{print $1}')
-            sess_tty=$(echo "$line" | awk '{print $2}')
-            sess_from=$(echo "$line" | awk '{print $5}' | tr -d '()')
-            sessions+="👤 <code>$sess_user</code> | 📺 $sess_tty | 📡 ${sess_from:-local}
-"
-            ((count++))
+        [[ -z "$line" ]] && continue
+
+        # Parse w -h output: USER TTY FROM LOGIN@ IDLE JCPU PCPU WHAT
+        local user tty from idle what
+        user=$(echo "$line" | awk '{print $1}')
+        tty=$(echo "$line" | awk '{print $2}')
+        from=$(echo "$line" | awk '{print $3}')
+        idle=$(echo "$line" | awk '{print $5}')
+        what=$(echo "$line" | awk '{for(i=8;i<=NF;i++) printf $i" "}' | sed 's/ $//')
+
+        [[ -z "$user" ]] && continue
+
+        # Determine session type and icon
+        local type_icon type_name
+        if [[ "$tty" =~ ^pts ]]; then
+            if [[ "$from" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+                type_icon="🔑"
+                type_name="SSH"
+            elif [[ "$from" == "-" ]] || [[ -z "$from" ]]; then
+                type_icon="📺"
+                type_name="PTY"
+            elif [[ "$from" =~ ^: ]]; then
+                type_icon="🖼️"
+                type_name="X11"
+            else
+                type_icon="📺"
+                type_name="PTY"
+            fi
+        elif [[ "$tty" =~ ^tty[0-9] ]]; then
+            type_icon="🖥️"
+            type_name="Console"
+        else
+            type_icon="📟"
+            type_name="Other"
         fi
-    done < <(who 2>/dev/null)
 
-    if [[ $count -eq 0 ]]; then
-        echo "📋 <b>Active Sessions on $SERVER_NAME</b>
+        # Format entry
+        output+="$type_icon <code>$user</code> [$type_name]
+"
+        output+="   ├ TTY: $tty"
+        if [[ -n "$from" ]] && [[ "$from" != "-" ]]; then
+            output+=" │ From: <code>$from</code>"
+        fi
+        output+="
+"
+        if [[ -n "$idle" ]] && [[ "$idle" != "0.00s" ]] && [[ "$idle" != "." ]]; then
+            output+="   ├ Idle: $idle
+"
+        fi
+        if [[ -n "$what" ]]; then
+            output+="   └ Cmd: <code>${what:0:30}</code>
+"
+        else
+            output+="   └ Cmd: -
+"
+        fi
 
-✨ No active sessions
+        ((interactive_count++))
+        ((total_count++))
+    done < <(w -h 2>/dev/null)
 
-🕐 Checked: $(date '+%Y-%m-%d %H:%M:%S')"
-    else
-        echo "📋 <b>Active Sessions on $SERVER_NAME</b>
-
-$sessions
-🕐 Updated: $(date '+%Y-%m-%d %H:%M:%S')"
+    if [[ $interactive_count -eq 0 ]]; then
+        output+="   ✨ None
+"
     fi
+
+    # Section 2: Active SSH Network Connections
+    output+="
+<b>🔌 SSH Connections (port 22):</b>
+"
+    local ssh_count=0
+    local seen_ips=""
+
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        [[ "$line" =~ ESTAB ]] || continue
+
+        # Extract peer address (5th column in ss output)
+        local peer
+        peer=$(echo "$line" | awk '{print $5}')
+        local peer_ip="${peer%:*}"
+        local peer_port="${peer##*:}"
+
+        # Skip loopback
+        [[ "$peer_ip" =~ ^127\. ]] && continue
+        [[ "$peer_ip" == "::1" ]] && continue
+        [[ -z "$peer_ip" ]] && continue
+
+        # Avoid duplicates
+        if [[ "$seen_ips" == *"$peer_ip"* ]]; then
+            continue
+        fi
+        seen_ips+="$peer_ip "
+
+        # Try to get process info
+        local proc_info=""
+        if [[ "$line" =~ users:\(\(\"([^\"]+)\" ]]; then
+            proc_info="${BASH_REMATCH[1]}"
+        fi
+
+        output+="   📡 <code>$peer_ip</code>:$peer_port"
+        [[ -n "$proc_info" ]] && output+=" ($proc_info)"
+        output+="
+"
+
+        ((ssh_count++))
+        ((total_count++))
+    done < <(ss -tnp 'sport = :22' 2>/dev/null)
+
+    if [[ $ssh_count -eq 0 ]]; then
+        output+="   ✨ None
+"
+    fi
+
+    # Section 3: Systemd Login Sessions
+    if command -v loginctl &>/dev/null; then
+        output+="
+<b>🎫 Login Sessions:</b>
+"
+        local session_count=0
+
+        while IFS= read -r line; do
+            [[ -z "$line" ]] && continue
+            [[ "$line" =~ ^SESSION ]] && continue  # Skip header
+
+            local session_id user tty
+            session_id=$(echo "$line" | awk '{print $1}')
+            user=$(echo "$line" | awk '{print $3}')
+            tty=$(echo "$line" | awk '{print $5}')
+
+            [[ -z "$session_id" ]] && continue
+            [[ ! "$session_id" =~ ^[0-9]+$ ]] && continue
+
+            # Get session state
+            local state=""
+            state=$(loginctl show-session "$session_id" -p State --value 2>/dev/null)
+
+            output+="   🎟️ #$session_id: <code>$user</code>"
+            [[ -n "$tty" ]] && [[ "$tty" != "-" ]] && output+=" @ $tty"
+            [[ -n "$state" ]] && output+=" [$state]"
+            output+="
+"
+
+            ((session_count++))
+        done < <(loginctl list-sessions --no-legend 2>/dev/null)
+
+        if [[ $session_count -eq 0 ]]; then
+            output+="   ✨ None
+"
+        fi
+    fi
+
+    # Footer with summary
+    output+="
+━━━━━━━━━━━━━━━━━━━━━━
+📊 Total: $total_count active connection(s)
+🕐 $(date '+%Y-%m-%d %H:%M:%S')"
+
+    echo "📋 <b>Active Sessions on $SERVER_NAME</b>
+
+$output"
 }
 
 #===============================================================================
