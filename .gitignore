@@ -1,0 +1,48 @@
+# Configuration files (may contain secrets)
+config.conf
+*.conf
+!config.conf.template
+
+# Logs
+*.log
+logs/
+
+# Runtime files
+*.pid
+*.lock
+
+# Temporary files
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDE/Editor directories
+.idea/
+.vscode/
+*.sublime-project
+*.sublime-workspace
+
+# Backup files
+*.backup
+*.bak
+*.backup.*
+
+# Test output
+test-output/
+coverage/
+
+# Local development
+.env
+.env.local
+.env.*.local

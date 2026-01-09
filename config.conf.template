@@ -1,0 +1,58 @@
+#===============================================================================
+# Server Connection Monitor Configuration
+#
+# Edit this file with your settings after installation.
+# Location: /etc/connection-monitor/config.conf
+#===============================================================================
+
+#-------------------------------------------------------------------------------
+# TELEGRAM CONFIGURATION (REQUIRED)
+#-------------------------------------------------------------------------------
+
+# Your Telegram Bot Token
+# Get it from @BotFather: https://t.me/BotFather
+TELEGRAM_BOT_TOKEN=""
+
+# Your Telegram Chat ID
+# Get it from @userinfobot: https://t.me/userinfobot
+# For groups, use the group chat ID (starts with -)
+TELEGRAM_CHAT_ID=""
+
+#-------------------------------------------------------------------------------
+# SERVER IDENTIFICATION
+#-------------------------------------------------------------------------------
+
+# Custom server name (auto-detected if empty)
+# Used in notifications and to route callback actions
+SERVER_NAME=""
+
+# Server IP address (auto-detected if empty)
+SERVER_IP=""
+
+#-------------------------------------------------------------------------------
+# NOTIFICATION FILTERS
+#-------------------------------------------------------------------------------
+
+# Users to exclude from notifications (space-separated)
+# Example: EXCLUDED_USERS="root backup monitoring"
+EXCLUDED_USERS=""
+
+# IPs to exclude from notifications (space-separated)
+# Example: EXCLUDED_IPS="192.168.1.100 10.0.0.1"
+EXCLUDED_IPS=""
+
+#-------------------------------------------------------------------------------
+# BEHAVIOR OPTIONS
+#-------------------------------------------------------------------------------
+
+# Deduplication window in seconds
+# Prevents duplicate notifications for same user+IP within this window
+DEDUP_WINDOW="10"
+
+# Enable geo-location lookup for IP addresses
+# Requires internet access to ip-api.com
+GEO_LOOKUP="true"
+
+# Enable debug logging
+# Logs to /var/log/connection-monitor.log
+DEBUG="false"

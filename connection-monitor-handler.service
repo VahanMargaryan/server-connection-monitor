@@ -1,0 +1,30 @@
+[Unit]
+Description=Server Connection Monitor - Telegram Callback Handler
+Documentation=https://github.com/VahanMargaryan/server-connection-monitor
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/connection-monitor-handler start
+ExecStop=/usr/local/bin/connection-monitor-handler stop
+Restart=always
+RestartSec=10
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=connection-monitor-handler
+
+# Security hardening
+PrivateTmp=true
+NoNewPrivileges=false
+ProtectSystem=false
+ProtectHome=false
+
+# Required capabilities for iptables and session management
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_KILL CAP_SYS_PTRACE
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_KILL CAP_SYS_PTRACE
+
+[Install]
+WantedBy=multi-user.target
