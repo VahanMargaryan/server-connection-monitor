@@ -5,7 +5,7 @@ Real-time Telegram notifications for SSH and server connections with inline acti
 ## Features
 
 - **Real-time Alerts** - Instant Telegram notifications when someone connects
-- **Geo-location** - See where connections originate
+- **Geolocation** - See where connections originate
 - **Multiple Connection Types** - SSH, tunnels, rsync, SCP, SFTP, local logins
 - **Inline Actions** - Block/unblock IP or kick user directly from Telegram
 - **Multi-server Support** - Deploy on multiple servers with unique identification
@@ -117,15 +117,15 @@ DEBUG="false"               # Enable debug logging
 
 ## Connection Types
 
-| Type | Icon | Description |
-|------|------|-------------|
-| SSH | 🔑 | Standard SSH login |
-| SSH Tunnel | 🚇 | Port forwarding without shell |
-| rsync | 📦 | rsync over SSH |
-| SCP/SFTP | 📁 | File transfers |
-| Local Login | 🖥️ | Console/TTY login |
-| sudo | ⚡ | Privilege escalation |
-| su | 👤 | User switching |
+| Type        | Icon | Description                   |
+|-------------|------|-------------------------------|
+| SSH         | 🔑   | Standard SSH login            |
+| SSH Tunnel  | 🚇   | Port forwarding without shell |
+| rsync       | 📦   | rsync over SSH                |
+| SCP/SFTP    | 📁   | File transfers                |
+| Local Login | 🖥️  | Console/TTY login             |
+| sudo        | ⚡    | Privilege escalation          |
+| su          | 👤   | User switching                |
 
 ## Inline Button Actions
 
@@ -153,14 +153,14 @@ DEBUG="false"               # Enable debug logging
 
 ## File Locations
 
-| File | Purpose |
-|------|---------|
-| `/usr/local/bin/connection-monitor` | Main notification script |
+| File                                        | Purpose                   |
+|---------------------------------------------|---------------------------|
+| `/usr/local/bin/connection-monitor`         | Main notification script  |
 | `/usr/local/bin/connection-monitor-handler` | Telegram callback handler |
-| `/etc/connection-monitor/config.conf` | Configuration file |
-| `/var/log/connection-monitor.log` | Notification logs |
-| `/var/log/connection-monitor-handler.log` | Handler logs |
-| `/var/lib/connection-monitor/` | State data |
+| `/etc/connection-monitor/config.conf`       | Configuration file        |
+| `/var/log/connection-monitor.log`           | Notification logs         |
+| `/var/log/connection-monitor-handler.log`   | Handler logs              |
+| `/var/lib/connection-monitor/`              | State data                |
 
 ## Commands Reference
 

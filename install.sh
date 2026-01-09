@@ -40,7 +40,6 @@ readonly NC='\033[0m'
 readonly INSTALL_DIR="/usr/local/bin"
 readonly CONFIG_DIR="/etc/connection-monitor"
 readonly LIB_DIR="/var/lib/connection-monitor"
-readonly LOG_DIR="/var/log"
 readonly SYSTEMD_DIR="/etc/systemd/system"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null || echo "/tmp")"
 
@@ -142,11 +141,9 @@ check_installed() {
 install_dependencies() {
     log_info "Installing dependencies..."
 
-    local pkg_manager=""
     local packages="curl python3 iptables iproute2"
 
     if command -v apt-get &>/dev/null; then
-        pkg_manager="apt"
         apt-get update -qq
         for pkg in $packages; do
             if ! dpkg -l "$pkg" 2>/dev/null | grep -q "^ii"; then
@@ -161,7 +158,6 @@ install_dependencies() {
             DEBIAN_FRONTEND=noninteractive apt-get install -y -qq iptables-persistent 2>/dev/null || true
         fi
     elif command -v yum &>/dev/null; then
-        pkg_manager="yum"
         for pkg in $packages; do
             if ! rpm -q "$pkg" &>/dev/null; then
                 yum install -y -q "$pkg" && log_step "Installed $pkg"
@@ -170,7 +166,6 @@ install_dependencies() {
             fi
         done
     elif command -v dnf &>/dev/null; then
-        pkg_manager="dnf"
         for pkg in $packages; do
             if ! rpm -q "$pkg" &>/dev/null; then
                 dnf install -y -q "$pkg" && log_step "Installed $pkg"
