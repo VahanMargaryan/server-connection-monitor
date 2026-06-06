@@ -29,6 +29,9 @@ SERVER_NAME=""
 # Server IP address (auto-detected if empty)
 SERVER_IP=""
 
+# SSH port (used by "Show Active Sessions" to list SSH connections)
+SSH_PORT="22"
+
 #-------------------------------------------------------------------------------
 # NOTIFICATION FILTERS
 #-------------------------------------------------------------------------------
@@ -40,6 +43,15 @@ EXCLUDED_USERS=""
 # IPs to exclude from notifications (space-separated)
 # Example: EXCLUDED_IPS="192.168.1.100 10.0.0.1"
 EXCLUDED_IPS=""
+
+# PAM services that never trigger alerts (space-separated). Prevents
+# false-positive notifications from cron jobs, sudo/su, the systemd user
+# manager, password tools and display managers.
+IGNORED_SERVICES="cron crond sudo su su-l runuser runuser-l systemd-user polkit-1 passwd chpasswd chsh chfn newgrp gdm-password gdm-launch-environment lightdm sddm xdm"
+
+# Notify on local sessions that have no remote IP (console / TTY logins).
+# Set to "false" to alert only on genuine remote (network) connections.
+NOTIFY_LOCAL="true"
 
 #-------------------------------------------------------------------------------
 # BEHAVIOR OPTIONS

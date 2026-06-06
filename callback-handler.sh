@@ -27,6 +27,7 @@ fi
 
 # Defaults
 SERVER_NAME="${SERVER_NAME:-$(hostname -f 2>/dev/null || hostname)}"
+SSH_PORT="${SSH_PORT:-22}"
 
 #===============================================================================
 # Logging
@@ -64,6 +65,21 @@ save_offset() {
 
 json_escape() {
     python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))' 2>/dev/null
+}
+
+# HTML-escape a string for Telegram parse_mode=HTML; result is stored in the
+# global _ESC. Pure bash (no subshell). '&' is replaced first so the '&' it
+# introduces for '<'/'>' is not re-escaped. Note: bash 5.2+ enables
+# patsub_replacement by default, which expands an unquoted '&' in a
+# ${var//pat/repl} replacement to the matched text — so we emit it as '\&'
+# there (on bash <5.2 the option is absent and a plain '&' is already literal).
+html_escape() {
+    local s="$1" amp='&'
+    shopt -q patsub_replacement 2>/dev/null && amp='\&'
+    s="${s//&/${amp}amp;}"
+    s="${s//</${amp}lt;}"
+    s="${s//>/${amp}gt;}"
+    _ESC="$s"
 }
 
 answer_callback_query() {
@@ -263,7 +279,7 @@ kick_user() {
     # Method 2: Kill SSH sessions from specific IP
     if [[ -n "$ip" ]] && [[ "$ip" != "Local/Unknown" ]]; then
         local pids
-        pids=$(ss -tnp 2>/dev/null | grep "$ip" | grep sshd | grep -oP 'pid=\K[0-9]+' | sort -u)
+        pids=$(ss -tnp 2>/dev/null | grep -F "$ip" | grep sshd | grep -oP 'pid=\K[0-9]+' | sort -u)
         for pid in $pids; do
             local proc_user
             proc_user=$(ps -o user= -p "$pid" 2>/dev/null)
@@ -306,165 +322,186 @@ kick_user() {
 }
 
 get_active_sessions() {
+    local ssh_port="${SSH_PORT:-22}"
     local output=""
     local total_count=0
+    local _ESC=""
 
-    # Section 1: Interactive Sessions (using 'w' for more details)
+    #---------------------------------------------------------------------------
+    # Section 1: Interactive sessions (single 'w' call, parsed in one pass)
+    #---------------------------------------------------------------------------
     output+="<b>👥 Interactive Sessions:</b>
 "
     local interactive_count=0
 
-    while IFS= read -r line; do
-        [[ -z "$line" ]] && continue
-
-        # Parse w -h output: USER TTY FROM LOGIN@ IDLE JCPU PCPU WHAT
-        local user tty from idle what
-        user=$(echo "$line" | awk '{print $1}')
-        tty=$(echo "$line" | awk '{print $2}')
-        from=$(echo "$line" | awk '{print $3}')
-        idle=$(echo "$line" | awk '{print $5}')
-        what=$(echo "$line" | awk '{for(i=8;i<=NF;i++) printf $i" "}' | sed 's/ $//')
-
+    # 'w -h' columns: USER TTY FROM LOGIN@ IDLE JCPU PCPU WHAT
+    # read assigns the remainder of the line (the full command) to 'what'.
+    local user tty from login idle jcpu pcpu what
+    while read -r user tty from login idle jcpu pcpu what; do
         [[ -z "$user" ]] && continue
 
         # Determine session type and icon
         local type_icon type_name
-        if [[ "$tty" =~ ^pts ]]; then
-            if [[ "$from" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+ ]]; then
-                type_icon="🔑"
-                type_name="SSH"
-            elif [[ "$from" == "-" ]] || [[ -z "$from" ]]; then
-                type_icon="📺"
-                type_name="PTY"
-            elif [[ "$from" =~ ^: ]]; then
-                type_icon="🖼️"
-                type_name="X11"
+        if [[ "$tty" == pts* ]]; then
+            if [[ "$from" == :* ]]; then
+                type_icon="🖼️"; type_name="X11"
+            elif [[ -n "$from" && "$from" != "-" ]]; then
+                type_icon="🔑"; type_name="SSH"
             else
-                type_icon="📺"
-                type_name="PTY"
+                type_icon="📺"; type_name="PTY"
             fi
-        elif [[ "$tty" =~ ^tty[0-9] ]]; then
-            type_icon="🖥️"
-            type_name="Console"
+        elif [[ "$tty" == tty[0-9]* ]]; then
+            type_icon="🖥️"; type_name="Console"
         else
-            type_icon="📟"
-            type_name="Other"
+            type_icon="📟"; type_name="Other"
         fi
 
-        # Format entry
-        output+="$type_icon <code>$user</code> [$type_name]
+        html_escape "$user"
+        output+="$type_icon <code>$_ESC</code> [$type_name]
 "
         output+="   ├ TTY: $tty"
-        if [[ -n "$from" ]] && [[ "$from" != "-" ]]; then
-            output+=" │ From: <code>$from</code>"
+        if [[ -n "$from" && "$from" != "-" ]]; then
+            html_escape "$from"
+            output+=" │ From: <code>$_ESC</code>"
         fi
         output+="
 "
-        if [[ -n "$idle" ]] && [[ "$idle" != "0.00s" ]] && [[ "$idle" != "." ]]; then
+        [[ -n "$idle" && "$idle" != "0.00s" && "$idle" != "." ]] && \
             output+="   ├ Idle: $idle
 "
-        fi
-        if [[ -n "$what" ]]; then
-            output+="   └ Cmd: <code>${what:0:30}</code>
+        html_escape "${what:0:40}"
+        output+="   └ Cmd: <code>$_ESC</code>
 "
-        else
-            output+="   └ Cmd: -
-"
-        fi
 
         ((interactive_count++))
         ((total_count++))
     done < <(w -h 2>/dev/null)
 
-    if [[ $interactive_count -eq 0 ]]; then
-        output+="   ✨ None
+    [[ $interactive_count -eq 0 ]] && output+="   ✨ None
 "
-    fi
 
-    # Section 2: Active SSH Network Connections
+    #---------------------------------------------------------------------------
+    # Section 2: Established SSH network connections (deduped by peer IP)
+    #---------------------------------------------------------------------------
     output+="
-<b>🔌 SSH Connections (port 22):</b>
+<b>🔌 SSH Connections (port ${ssh_port}):</b>
 "
     local ssh_count=0
-    local seen_ips=""
+    declare -A seen_ips=()
 
-    while IFS= read -r line; do
-        [[ -z "$line" ]] && continue
-        [[ "$line" =~ ESTAB ]] || continue
+    # 'ss -tnpH' columns: State Recv-Q Send-Q LocalAddr:Port PeerAddr:Port Process
+    local state recvq sendq local_addr peer process
+    while read -r state recvq sendq local_addr peer process; do
+        [[ "$state" == ESTAB ]] || continue
 
-        # Extract peer address (5th column in ss output)
-        local peer
-        peer=$(echo "$line" | awk '{print $5}')
-        local peer_ip="${peer%:*}"
-        local peer_port="${peer##*:}"
+        # Split "addr:port"; IPv6 peers are formatted as "[addr]:port"
+        local peer_ip="${peer%:*}" peer_port="${peer##*:}"
+        peer_ip="${peer_ip#[}"; peer_ip="${peer_ip%]}"
 
-        # Skip loopback
-        [[ "$peer_ip" =~ ^127\. ]] && continue
-        [[ "$peer_ip" == "::1" ]] && continue
-        [[ -z "$peer_ip" ]] && continue
+        [[ -z "$peer_ip" || "$peer_ip" == 127.* || "$peer_ip" == "::1" ]] && continue
+        [[ -n "${seen_ips[$peer_ip]:-}" ]] && continue
+        seen_ips[$peer_ip]=1
 
-        # Avoid duplicates
-        if [[ "$seen_ips" == *"$peer_ip"* ]]; then
-            continue
-        fi
-        seen_ips+="$peer_ip "
-
-        # Try to get process info
+        # Process name (only present when running as root): users:(("sshd",...))
         local proc_info=""
-        if [[ "$line" =~ users:\(\(\"([^\"]+)\" ]]; then
-            proc_info="${BASH_REMATCH[1]}"
-        fi
+        [[ "$process" =~ \"([^\"]+)\" ]] && proc_info="${BASH_REMATCH[1]}"
 
         output+="   📡 <code>$peer_ip</code>:$peer_port"
-        [[ -n "$proc_info" ]] && output+=" ($proc_info)"
+        if [[ -n "$proc_info" ]]; then
+            html_escape "$proc_info"
+            output+=" ($_ESC)"
+        fi
         output+="
 "
 
         ((ssh_count++))
         ((total_count++))
-    done < <(ss -tnp 'sport = :22' 2>/dev/null)
+    done < <(ss -tnpH "sport = :$ssh_port" 2>/dev/null)
 
-    if [[ $ssh_count -eq 0 ]]; then
-        output+="   ✨ None
+    [[ $ssh_count -eq 0 ]] && output+="   ✨ None
 "
-    fi
 
-    # Section 3: Systemd Login Sessions
+    #---------------------------------------------------------------------------
+    # Section 3: systemd login sessions (loginctl, enriched per session)
+    #
+    # The first column of 'list-sessions' is always the session id (stable
+    # across systemd versions); everything else is read from 'show-session'
+    # as Key=Value pairs, so we never depend on the table's column layout.
+    #---------------------------------------------------------------------------
     if command -v loginctl &>/dev/null; then
         output+="
 <b>🎫 Login Sessions:</b>
 "
         local session_count=0
 
-        while IFS= read -r line; do
-            [[ -z "$line" ]] && continue
-            [[ "$line" =~ ^SESSION ]] && continue  # Skip header
+        local sid
+        while read -r sid _; do
+            # systemd session IDs are alphanumeric (sd-login spec), not just digits
+            [[ "$sid" =~ ^[a-zA-Z0-9]+$ ]] || continue
 
-            local session_id user tty
-            session_id=$(echo "$line" | awk '{print $1}')
-            user=$(echo "$line" | awk '{print $3}')
-            tty=$(echo "$line" | awk '{print $5}')
+            local s_name s_type s_class s_state s_remote s_remhost s_service s_tty
+            s_name=""; s_type=""; s_class=""; s_state=""
+            s_remote=""; s_remhost=""; s_service=""; s_tty=""
+            local key val
+            while IFS='=' read -r key val; do
+                case "$key" in
+                    Name)       s_name="$val" ;;
+                    Type)       s_type="$val" ;;
+                    Class)      s_class="$val" ;;
+                    State)      s_state="$val" ;;
+                    Remote)     s_remote="$val" ;;
+                    RemoteHost) s_remhost="$val" ;;
+                    Service)    s_service="$val" ;;
+                    TTY)        s_tty="$val" ;;
+                esac
+            done < <(loginctl show-session "$sid" \
+                        -p Name -p Type -p Class -p State \
+                        -p Remote -p RemoteHost -p Service -p TTY 2>/dev/null)
 
-            [[ -z "$session_id" ]] && continue
-            [[ ! "$session_id" =~ ^[0-9]+$ ]] && continue
+            # Pick an icon from remote flag / class / type
+            local s_icon
+            if [[ "$s_remote" == "yes" || -n "$s_remhost" ]]; then
+                s_icon="🔑"
+            elif [[ "$s_class" == greeter ]]; then
+                s_icon="🪟"
+            elif [[ "$s_type" == x11 || "$s_type" == wayland || "$s_type" == mir ]]; then
+                s_icon="🖼️"
+            elif [[ "$s_type" == tty ]]; then
+                s_icon="🖥️"
+            else
+                s_icon="📟"
+            fi
 
-            # Get session state
-            local state=""
-            state=$(loginctl show-session "$session_id" -p State --value 2>/dev/null)
-
-            output+="   🎟️ #$session_id: <code>$user</code>"
-            [[ -n "$tty" ]] && [[ "$tty" != "-" ]] && output+=" @ $tty"
-            [[ -n "$state" ]] && output+=" [$state]"
+            html_escape "${s_name:-?}"
+            output+="$s_icon #$sid <code>$_ESC</code>"
+            [[ -n "$s_class" ]] && output+=" [$s_class]"
             output+="
+"
+
+            local detail=""
+            if [[ -n "$s_remhost" ]]; then
+                html_escape "$s_remhost"
+                detail="From: <code>$_ESC</code>"
+            fi
+            if [[ -n "$s_tty" && "$s_tty" != "-" ]]; then
+                [[ -n "$detail" ]] && detail+=" │ "
+                detail+="TTY: $s_tty"
+            fi
+            if [[ -n "$s_service" ]]; then
+                [[ -n "$detail" ]] && detail+=" │ "
+                html_escape "$s_service"
+                detail+="via: $_ESC"
+            fi
+            [[ -n "$detail" ]] && output+="   ├ $detail
+"
+            output+="   └ State: ${s_state:-unknown}
 "
 
             ((session_count++))
         done < <(loginctl list-sessions --no-legend 2>/dev/null)
 
-        if [[ $session_count -eq 0 ]]; then
-            output+="   ✨ None
+        [[ $session_count -eq 0 ]] && output+="   ✨ None
 "
-        fi
     fi
 
     # Footer with summary
@@ -487,6 +524,7 @@ process_callback() {
     local data="$2"
     local chat_id="$3"
     local from_id="$4"
+    local _ESC=""
 
     log "INFO" "Processing callback: $data from user $from_id"
 
@@ -520,11 +558,13 @@ process_callback() {
             case $exit_code in
                 0)
                     answer_callback_query "$callback_query_id" "IP $ip blocked on $SERVER_NAME" true
+                    # Raw $ip in callback_data; HTML-escaped copy for the message
                     local unblock_keyboard="{\"inline_keyboard\":[[{\"text\":\"✅ Unblock IP\",\"callback_data\":\"unblock:$ip:$SERVER_NAME\"}]]}"
+                    html_escape "$ip"
                     send_message_with_keyboard "🚫 <b>IP Blocked</b>
 
 🖥️ Server: <code>$SERVER_NAME</code>
-📡 IP: <code>$ip</code>
+📡 IP: <code>$_ESC</code>
 🕐 Time: $(date '+%Y-%m-%d %H:%M:%S')
 👤 By: User $from_id" "$unblock_keyboard"
                     ;;
@@ -558,10 +598,11 @@ process_callback() {
             case $exit_code in
                 0)
                     answer_callback_query "$callback_query_id" "IP $ip unblocked on $SERVER_NAME" true
+                    html_escape "$ip"
                     send_message "✅ <b>IP Unblocked</b>
 
 🖥️ Server: <code>$SERVER_NAME</code>
-📡 IP: <code>$ip</code>
+📡 IP: <code>$_ESC</code>
 🕐 Time: $(date '+%Y-%m-%d %H:%M:%S')
 👤 By: User $from_id"
                     ;;
@@ -585,11 +626,13 @@ process_callback() {
 
             if kick_user "$user" "$ip" "$session_id"; then
                 answer_callback_query "$callback_query_id" "User $user kicked from $SERVER_NAME" true
+                local user_disp; html_escape "$user"; user_disp="$_ESC"
+                html_escape "$ip"
                 send_message "👢 <b>User Kicked</b>
 
 🖥️ Server: <code>$SERVER_NAME</code>
-👤 User: <code>$user</code>
-📡 IP: <code>$ip</code>
+👤 User: <code>$user_disp</code>
+📡 IP: <code>$_ESC</code>
 🕐 Time: $(date '+%Y-%m-%d %H:%M:%S')"
             else
                 answer_callback_query "$callback_query_id" "No active sessions for $user" false

@@ -1,100 +1,52 @@
 # Server Connection Monitor
 
-Real-time Telegram notifications for SSH and server connections with inline action buttons to block/unblock IPs or kick users directly from your phone.
+Real-time Telegram alerts for SSH / server logins, with inline buttons to block or
+unblock an IP and kick a user straight from your phone.
 
 ## Features
 
-- **Real-time Alerts** - Instant Telegram notifications when someone connects
-- **Geolocation** - See where connections originate
-- **Multiple Connection Types** - SSH, tunnels, rsync, SCP, SFTP, local logins
-- **Inline Actions** - Block/unblock IP or kick user directly from Telegram
-- **Multi-server Support** - Deploy on multiple servers with unique identification
-- **Security Integration** - Works with iptables, hosts.deny, and fail2ban
+- Instant alert on every connection — SSH, tunnels, rsync, SCP/SFTP, console
+- Inline buttons: **Block IP · Unblock IP · Kick User · Show Active Sessions**
+- IP geolocation, multi-server support, `iptables` / `hosts.deny` / `fail2ban` integration
+- Noise control: ignores `cron`/`sudo`/`su`/`systemd` sessions, optional remote-only mode
 
-## Quick Start
+## Install
 
-### 1. Create a Telegram Bot
-
-1. Open Telegram and search for **@BotFather**
-2. Send `/newbot` and follow the prompts
-3. Save the **Bot Token** provided
-
-### 2. Get Your Chat ID
-
-1. Search for **@userinfobot** in Telegram
-2. Start the bot to see your Chat ID
-3. For group notifications, add your bot to a group first
-
-### 3. Install
-
-**One-line installation:**
+1. Create a bot with [@BotFather](https://t.me/BotFather) (`/newbot`) and copy the **token**.
+2. Get your **chat ID** from [@userinfobot](https://t.me/userinfobot).
+3. Run the installer — it downloads everything and prompts for the token/chat ID
+   (even when piped):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/VahanMargaryan/server-connection-monitor/main/install.sh | sudo bash
 ```
 
-Or with wget:
+`wget -qO- <same-url> | sudo bash` works too. **Unattended** (no prompts):
 
 ```bash
-wget -qO- https://raw.githubusercontent.com/VahanMargaryan/server-connection-monitor/main/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/VahanMargaryan/server-connection-monitor/main/install.sh \
+  | sudo TELEGRAM_BOT_TOKEN="123456:ABC-DEF..." TELEGRAM_CHAT_ID="987654321" bash
 ```
 
-**Manual installation:**
+From a checkout: `git clone …/server-connection-monitor.git && cd server-connection-monitor && sudo ./install.sh`
+
+Then test it: `sudo connection-monitor test`
+
+## Managing
+
+Run any command remotely (no checkout needed) by appending it after `bash -s`:
 
 ```bash
-git clone https://github.com/VahanMargaryan/server-connection-monitor.git
-cd server-connection-monitor
-sudo ./install.sh
+curl -fsSL https://raw.githubusercontent.com/VahanMargaryan/server-connection-monitor/main/install.sh | sudo bash -s update
+curl -fsSL https://raw.githubusercontent.com/VahanMargaryan/server-connection-monitor/main/install.sh | sudo bash -s uninstall
 ```
 
-### 4. Configure
-
-During installation, you'll be prompted for your Bot Token and Chat ID. Or edit manually:
+From a checkout: `sudo ./install.sh {install|update|fix|uninstall|test|status|help}`
 
 ```bash
-sudo nano /etc/connection-monitor/config.conf
-```
-
-### 5. Test
-
-```bash
-sudo connection-monitor test
-```
-
-## Installation Commands
-
-The unified installer supports multiple commands:
-
-```bash
-sudo ./install.sh install    # Fresh installation (default)
-sudo ./install.sh update     # Update existing installation
-sudo ./install.sh fix        # Fix duplicate notifications
-sudo ./install.sh uninstall  # Remove installation
-sudo ./install.sh test       # Test Telegram notification
-sudo ./install.sh status     # Show installation status
-sudo ./install.sh help       # Show help
-```
-
-## Notification Example
-
-When someone connects, you receive:
-
-```
-🔑 New Connection Alert
-
-🖥️ Server: prod-server-01
-🌐 Server IP: 203.0.113.10
-
-👤 User: admin
-📡 Client IP: 198.51.100.50
-📍 Location: United States, New York, Comcast
-🔌 Type: SSH
-📺 TTY: pts/0
-🕐 Time: 2024-01-15 14:30:25 UTC
-🔢 Session: 12345
-
-[🚫 Block IP] [👢 Kick User]
-[📋 Show Active Sessions]
+sudo systemctl status connection-monitor-handler     # daemon status
+sudo journalctl -u connection-monitor-handler -f     # button/handler logs
+sudo tail -f /var/log/connection-monitor.log         # alert logs
 ```
 
 ## Configuration
@@ -102,154 +54,68 @@ When someone connects, you receive:
 Edit `/etc/connection-monitor/config.conf`:
 
 ```bash
-# Required
-TELEGRAM_BOT_TOKEN="your-bot-token"
-TELEGRAM_CHAT_ID="your-chat-id"
+TELEGRAM_BOT_TOKEN="..."     # required
+TELEGRAM_CHAT_ID="..."       # required
 
-# Optional
-SERVER_NAME=""              # Custom name (auto-detected if empty)
-EXCLUDED_USERS="backup"     # Space-separated users to ignore
-EXCLUDED_IPS="10.0.0.1"     # Space-separated IPs to ignore
-DEDUP_WINDOW="10"           # Seconds to suppress duplicate notifications
-GEO_LOOKUP="true"           # Enable IP geo-location
-DEBUG="false"               # Enable debug logging
+SERVER_NAME=""               # label shown in alerts (auto-detected if empty)
+SSH_PORT="22"                # port used when listing active SSH connections
+EXCLUDED_USERS="backup"      # users to never alert on (space-separated)
+EXCLUDED_IPS="10.0.0.1"      # IPs to never alert on (space-separated)
+IGNORED_SERVICES="cron sudo su systemd-user ..."  # PAM services that never alert
+NOTIFY_LOCAL="true"          # false = alert only on remote (network) logins
+DEDUP_WINDOW="10"            # seconds to suppress duplicate alerts
+GEO_LOOKUP="true"            # IP geolocation
+DEBUG="false"
 ```
 
-## Connection Types
+`IGNORED_SERVICES` and `NOTIFY_LOCAL` suppress false positives from cron jobs,
+privilege escalation and local console/TTY sessions. After editing, run
+`sudo systemctl restart connection-monitor-handler`.
 
-| Type        | Icon | Description                   |
-|-------------|------|-------------------------------|
-| SSH         | 🔑   | Standard SSH login            |
-| SSH Tunnel  | 🚇   | Port forwarding without shell |
-| rsync       | 📦   | rsync over SSH                |
-| SCP/SFTP    | 📁   | File transfers                |
-| Local Login | 🖥️  | Console/TTY login             |
-| sudo        | ⚡    | Privilege escalation          |
-| su          | 👤   | User switching                |
+## Example alert
 
-## Inline Button Actions
+```
+🔑 New Connection Alert
+🖥️ Server: prod-01        📡 Client IP: 198.51.100.50
+👤 User: admin            📍 Location: New York, Comcast
+🔌 Type: SSH              🕐 2026-01-15 14:30:25 UTC
 
-### 🚫 Block IP
-- Adds IP to iptables DROP rule
-- Adds to `/etc/hosts.deny`
-- Integrates with fail2ban if installed
-- Rules persist across reboots
-- Shows "Unblock IP" button after blocking
-
-### ✅ Unblock IP
-- Removes IP from iptables DROP rule
-- Removes from `/etc/hosts.deny`
-- Unbans from fail2ban if installed
-- Available after blocking an IP
-
-### 👢 Kick User
-- Terminates active sessions via loginctl
-- Kills SSH connections from the IP
-- Closes all PTY sessions for the user
-
-### 📋 Show Active Sessions
-- Lists all currently logged-in users
-- Shows TTY, connection source, and time
-
-## File Locations
-
-| File                                        | Purpose                   |
-|---------------------------------------------|---------------------------|
-| `/usr/local/bin/connection-monitor`         | Main notification script  |
-| `/usr/local/bin/connection-monitor-handler` | Telegram callback handler |
-| `/etc/connection-monitor/config.conf`       | Configuration file        |
-| `/var/log/connection-monitor.log`           | Notification logs         |
-| `/var/log/connection-monitor-handler.log`   | Handler logs              |
-| `/var/lib/connection-monitor/`              | State data                |
-
-## Commands Reference
-
-```bash
-# Test notification
-sudo connection-monitor test
-
-# Check service status
-sudo systemctl status connection-monitor-handler
-
-# View handler logs (real-time)
-sudo journalctl -u connection-monitor-handler -f
-
-# View notification logs
-sudo tail -f /var/log/connection-monitor.log
-
-# Restart the handler
-sudo systemctl restart connection-monitor-handler
-
-# Edit configuration
-sudo nano /etc/connection-monitor/config.conf
+[🚫 Block IP] [👢 Kick User] [📋 Show Active Sessions]
 ```
 
-## How It Works
+## How it works
 
-1. **PAM Integration** - The script hooks into PAM to detect login events
-2. **Connection Detection** - Identifies connection type and source IP
-3. **Telegram Notification** - Sends alert via Bot API with inline keyboard
-4. **Callback Handling** - Background daemon polls for button presses
-5. **Action Execution** - Block/kick commands run with root privileges
-
-## Multi-Server Deployment
-
-Deploy on multiple servers by:
-
-1. Installing on each server
-2. Using unique `SERVER_NAME` for each
-3. Using the same bot token and chat ID
-
-Each notification identifies which server sent it. Button actions are routed to the correct server.
+A PAM hook in `/etc/pam.d/sshd` runs the monitor on each login and sends the
+alert. A small systemd daemon long-polls Telegram and executes button actions as
+root — block/unblock via `iptables` + `hosts.deny` + `fail2ban`, kick via
+`loginctl`. For multiple servers, give each a unique `SERVER_NAME` and reuse the
+same bot/chat; actions are routed back to the correct host.
 
 ## Troubleshooting
 
-### Notifications not sending
-
 ```bash
-sudo connection-monitor test
-cat /etc/connection-monitor/config.conf
-sudo tail -f /var/log/connection-monitor.log
+sudo connection-monitor test                        # no alerts? test + check logs
+sudo systemctl restart connection-monitor-handler   # buttons dead? restart daemon
+sudo ./install.sh fix                                # duplicate alerts
+grep connection-monitor /etc/pam.d/sshd             # PAM not triggering?
 ```
 
-### Buttons not working
+## Testing
 
-```bash
-sudo systemctl status connection-monitor-handler
-sudo journalctl -u connection-monitor-handler -f
-sudo systemctl restart connection-monitor-handler
-```
-
-### Duplicate notifications
-
-```bash
-sudo ./install.sh fix
-```
-
-### PAM not triggering
-
-```bash
-grep connection-monitor /etc/pam.d/sshd
-sudo systemctl restart sshd
-```
+`./tests/run-tests.sh` — self-contained suite, no root/network required (system
+commands are stubbed). See [`tests/README.md`](tests/README.md).
 
 ## Requirements
 
-- Linux (Debian/Ubuntu/RHEL)
-- Bash 4.0+
-- curl
-- Python 3
-- iptables
-- systemd
+Linux (Debian/Ubuntu/RHEL), bash 4+, curl (or wget for the installer), Python 3,
+iptables, systemd.
 
-## Security Considerations
+## Security
 
-- Configuration file has restricted permissions (600)
-- Bot token is kept server-side only
-- Actions validate server name to prevent cross-server attacks
-- Callback handler validates chat ID before executing
-- All actions are logged
+Config file is `600`; the bot token stays server-side; the handler validates the
+chat ID and server name before acting; user/network-supplied values are
+HTML-escaped before sending; all actions are logged.
 
 ## License
 
-MIT License
+MIT

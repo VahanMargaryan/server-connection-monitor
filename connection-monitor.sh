@@ -39,6 +39,16 @@ DEBUG="${DEBUG:-false}"
 DEDUP_WINDOW="${DEDUP_WINDOW:-10}"
 GEO_LOOKUP="${GEO_LOOKUP:-true}"
 
+# PAM services that must NOT raise alerts (space-separated). These are local or
+# automated sessions — cron jobs, privilege escalation (sudo/su), the systemd
+# user manager, password tools and display managers — that are not remote logins
+# and would otherwise produce false-positive notifications.
+IGNORED_SERVICES="${IGNORED_SERVICES:-cron crond sudo su su-l runuser runuser-l systemd-user polkit-1 passwd chpasswd chsh chfn newgrp gdm-password gdm-launch-environment lightdm sddm xdm}"
+
+# Alert on local sessions that have no remote client IP (physical console / TTY
+# logins). Set to "false" to be notified only about genuine remote connections.
+NOTIFY_LOCAL="${NOTIFY_LOCAL:-true}"
+
 #===============================================================================
 # Logging
 #===============================================================================
@@ -182,6 +192,21 @@ json_escape() {
     python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))' 2>/dev/null
 }
 
+# HTML-escape a string for Telegram parse_mode=HTML; result is stored in the
+# global _ESC. Pure bash (no subshell). '&' is replaced first so the '&' it
+# introduces for '<'/'>' is not re-escaped. Note: bash 5.2+ enables
+# patsub_replacement by default, which expands an unquoted '&' in a
+# ${var//pat/repl} replacement to the matched text — so we emit it as '\&'
+# there (on bash <5.2 the option is absent and a plain '&' is already literal).
+html_escape() {
+    local s="$1" amp='&'
+    shopt -q patsub_replacement 2>/dev/null && amp='\&'
+    s="${s//&/${amp}amp;}"
+    s="${s//</${amp}lt;}"
+    s="${s//>/${amp}gt;}"
+    _ESC="$s"
+}
+
 send_telegram_message() {
     local message="$1"
     local inline_keyboard="$2"
@@ -241,13 +266,31 @@ EOF
 
 send_connection_alert() {
     local user="${PAM_USER:-$USER}"
+    local service="${PAM_SERVICE:-}"
     local tty="${PAM_TTY:-}"
     tty="${tty#/dev/}"  # Remove /dev/ prefix if present
     local session_id="${XDG_SESSION_ID:-$$}"
 
+    # Skip noisy / non-login PAM services (cron, sudo, su, systemd-user, ...) so
+    # privilege escalation and automated sessions don't raise false alerts.
+    if [[ -n "$service" ]]; then
+        for ignored in $IGNORED_SERVICES; do
+            if [[ "$service" == "$ignored" ]]; then
+                log "INFO" "Skipping ignored PAM service: $service (user=$user)"
+                return 0
+            fi
+        done
+    fi
+
     # Get connection details
     local client_ip
     client_ip=$(get_client_ip)
+
+    # Optionally skip local sessions with no remote IP (console / TTY logins)
+    if [[ "$NOTIFY_LOCAL" != "true" ]] && [[ "$client_ip" == "Local/Unknown" ]]; then
+        log "INFO" "Skipping local session (NOTIFY_LOCAL=false): user=$user service=$service"
+        return 0
+    fi
 
     local connection_type
     connection_type=$(get_connection_type "$user" "$tty")
@@ -297,17 +340,29 @@ send_connection_alert() {
         *su*)           emoji="👤" ;;
     esac
 
+    # HTML-escape user/network-derived values before embedding them in the
+    # HTML message. geo_info comes from ip-api and routinely contains '&'
+    # (e.g. ISP "AT&T"); a raw '&', '<' or '>' makes Telegram reject the send
+    # with HTTP 400 and the alert is lost. Raw values are still used for the
+    # keyboard callback_data below.
+    local _ESC="" e_user e_ip e_geo e_type e_tty
+    html_escape "$user";            e_user="$_ESC"
+    html_escape "$client_ip";       e_ip="$_ESC"
+    html_escape "$geo_info";        e_geo="$_ESC"
+    html_escape "$connection_type"; e_type="$_ESC"
+    html_escape "${tty:-N/A}";      e_tty="$_ESC"
+
     # Build message
     local message="${emoji} <b>New Connection Alert</b>
 
 🖥️ <b>Server:</b> <code>${SERVER_NAME}</code>
 🌐 <b>Server IP:</b> <code>${SERVER_IP}</code>
 
-👤 <b>User:</b> <code>${user}</code>
-📡 <b>Client IP:</b> <code>${client_ip}</code>
-📍 <b>Location:</b> ${geo_info}
-🔌 <b>Type:</b> ${connection_type}
-📺 <b>TTY:</b> ${tty:-N/A}
+👤 <b>User:</b> <code>${e_user}</code>
+📡 <b>Client IP:</b> <code>${e_ip}</code>
+📍 <b>Location:</b> ${e_geo}
+🔌 <b>Type:</b> ${e_type}
+📺 <b>TTY:</b> ${e_tty}
 🕐 <b>Time:</b> ${timestamp}
 🔢 <b>Session:</b> ${session_id}"
 

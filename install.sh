@@ -7,6 +7,11 @@
 # Usage:
 #   sudo ./install.sh [command]
 #
+# One-line remote install / update (no checkout needed):
+#   curl -fsSL https://raw.githubusercontent.com/VahanMargaryan/server-connection-monitor/main/install.sh | sudo bash
+#   curl -fsSL https://raw.githubusercontent.com/VahanMargaryan/server-connection-monitor/main/install.sh | sudo bash -s update
+#   wget -qO- https://raw.githubusercontent.com/VahanMargaryan/server-connection-monitor/main/install.sh | sudo bash
+#
 # Commands:
 #   install     Fresh installation (default)
 #   update      Update existing installation
@@ -21,7 +26,7 @@
 set -euo pipefail
 
 # Version
-VERSION="2.0.0"
+VERSION="2.1.0"
 
 # GitHub repository for remote installation
 readonly GITHUB_REPO="VahanMargaryan/server-connection-monitor"
@@ -41,12 +46,26 @@ readonly INSTALL_DIR="/usr/local/bin"
 readonly CONFIG_DIR="/etc/connection-monitor"
 readonly LIB_DIR="/var/lib/connection-monitor"
 readonly SYSTEMD_DIR="/etc/systemd/system"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null || echo "/tmp")"
+# When piped via stdin (curl|bash) BASH_SOURCE is empty; fall back so we don't
+# trip `set -u`. An unresolved SCRIPT_DIR simply triggers the GitHub download.
+if [[ -n "${BASH_SOURCE[0]:-}" ]]; then
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null || echo "/tmp")"
+else
+    SCRIPT_DIR="/tmp"
+fi
 
 # Script names
 readonly MONITOR_SCRIPT="connection-monitor"
 readonly HANDLER_SCRIPT="connection-monitor-handler"
 readonly SERVICE_NAME="connection-monitor-handler"
+
+# Non-interactive support (for `curl ... | sudo bash` and automation).
+# Capture any credentials from the environment BEFORE config.conf is sourced
+# (sourcing would otherwise overwrite these with the empty template values).
+ENV_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-}"
+ENV_CHAT_ID="${TELEGRAM_CHAT_ID:-}"
+# ASSUME_YES=true (or no terminal available) skips all interactive prompts.
+ASSUME_YES="${ASSUME_YES:-false}"
 
 #===============================================================================
 # Output Functions
@@ -76,6 +95,33 @@ die() {
     exit 1
 }
 
+# Prompt for input, storing the reply in the variable named by $2.
+#   ask <prompt> <var_name> [default]
+# Works even when the script is piped via stdin (curl|bash): in that case the
+# script body occupies stdin, so we read the answer from the controlling
+# terminal /dev/tty instead. With no terminal at all (ASSUME_YES or CI), the
+# default is used. Never aborts under `set -e` (read EOF is handled).
+ask() {
+    local prompt="$1" __var="$2" default="${3:-}" reply=""
+    if [[ "$ASSUME_YES" == "true" ]]; then
+        reply="$default"
+    elif [[ -t 0 ]]; then
+        read -rp "$prompt" reply || reply="$default"
+    elif [[ -e /dev/tty ]]; then
+        read -rp "$prompt" reply < /dev/tty || reply="$default"
+    else
+        reply="$default"
+    fi
+    printf -v "$__var" '%s' "$reply"
+}
+
+# Escape a value for safe use as the replacement text in `sed s|...|VALUE|`
+# (escapes the '|' delimiter, '&', and backslash) so credentials containing
+# those characters cannot corrupt config.conf or break the sed command.
+esc_sed() {
+    printf '%s' "$1" | sed 's/[&|\]/\\&/g'
+}
+
 #===============================================================================
 # Validation Functions
 #===============================================================================
@@ -90,6 +136,25 @@ check_os() {
     fi
 }
 
+# True if a supported downloader (curl or wget) is available.
+have_downloader() {
+    command -v curl &>/dev/null || command -v wget &>/dev/null
+}
+
+# Download a URL to a file using curl or wget, whichever is present.
+#   fetch <url> <output_path>
+# Returns non-zero on failure (HTTP errors included) or if neither tool exists.
+fetch() {
+    local url="$1" out="$2"
+    if command -v curl &>/dev/null; then
+        curl -fsSL "$url" -o "$out"
+    elif command -v wget &>/dev/null; then
+        wget -q -O "$out" "$url"
+    else
+        return 127
+    fi
+}
+
 download_remote_files() {
     log_info "Downloading files from GitHub..."
 
@@ -101,7 +166,7 @@ download_remote_files() {
 
     for file in "${files[@]}"; do
         local url="${GITHUB_RAW_URL}/${file}"
-        if curl -fsSL "$url" -o "$temp_dir/$file" 2>/dev/null; then
+        if fetch "$url" "$temp_dir/$file"; then
             log_step "Downloaded $file"
         else
             log_warn "Could not download $file (may be optional)"
@@ -121,11 +186,11 @@ check_source_files() {
     [[ -f "$SCRIPT_DIR/callback-handler.sh" ]] || missing+=("callback-handler.sh")
 
     if [[ ${#missing[@]} -gt 0 ]]; then
-        # Try to download from GitHub
-        if command -v curl &>/dev/null; then
+        # Not run from a checkout (e.g. piped via curl|bash): fetch from GitHub
+        if have_downloader; then
             download_remote_files
         else
-            die "Missing required files: ${missing[*]}. Install curl for remote installation."
+            die "Missing required files: ${missing[*]}. Install curl or wget for remote installation."
         fi
     fi
 }
@@ -224,11 +289,20 @@ SERVER_NAME=""
 # Server IP (auto-detected if empty)
 SERVER_IP=""
 
+# SSH port (used by "Show Active Sessions" to list SSH connections)
+SSH_PORT="22"
+
 # Users to exclude (space-separated)
 EXCLUDED_USERS=""
 
 # IPs to exclude (space-separated)
 EXCLUDED_IPS=""
+
+# PAM services that never trigger alerts (prevents cron/sudo/su/systemd noise)
+IGNORED_SERVICES="cron crond sudo su su-l runuser runuser-l systemd-user polkit-1 passwd chpasswd chsh chfn newgrp gdm-password gdm-launch-environment lightdm sddm xdm"
+
+# Notify on local sessions with no remote IP (console / TTY logins); false = remote only
+NOTIFY_LOCAL="true"
 
 # Deduplication window in seconds (prevents duplicate notifications)
 DEDUP_WINDOW="10"
@@ -378,10 +452,32 @@ interactive_setup() {
     # Check if already configured
     if [[ -f "$CONFIG_DIR/config.conf" ]]; then
         source "$CONFIG_DIR/config.conf"
-        if [[ -n "$TELEGRAM_BOT_TOKEN" ]] && [[ "$TELEGRAM_BOT_TOKEN" != "YOUR_BOT_TOKEN_HERE" ]]; then
+        if [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]] && [[ "$TELEGRAM_BOT_TOKEN" != "YOUR_BOT_TOKEN_HERE" ]]; then
             log_step "Telegram already configured"
             return
         fi
+    fi
+
+    # Non-interactive: credentials supplied via environment
+    #   curl ... | sudo TELEGRAM_BOT_TOKEN=xxx TELEGRAM_CHAT_ID=yyy bash
+    if [[ -n "$ENV_BOT_TOKEN" ]] && [[ -n "$ENV_CHAT_ID" ]]; then
+        if [[ ! -f "$CONFIG_DIR/config.conf" ]]; then
+            log_warn "Config file missing; cannot apply environment credentials"
+            return
+        fi
+        sed -i "s|^TELEGRAM_BOT_TOKEN=.*|TELEGRAM_BOT_TOKEN=\"$(esc_sed "$ENV_BOT_TOKEN")\"|" "$CONFIG_DIR/config.conf"
+        sed -i "s|^TELEGRAM_CHAT_ID=.*|TELEGRAM_CHAT_ID=\"$(esc_sed "$ENV_CHAT_ID")\"|" "$CONFIG_DIR/config.conf"
+        log_step "Telegram credentials configured from environment"
+        return
+    fi
+
+    # No way to prompt (ASSUME_YES, or piped with no controlling terminal):
+    # finish the install and let the user add credentials afterwards.
+    if [[ "$ASSUME_YES" == "true" ]] || { [[ ! -t 0 ]] && [[ ! -e /dev/tty ]]; }; then
+        log_warn "Telegram not configured (non-interactive install)"
+        log_info "Add credentials: sudo nano $CONFIG_DIR/config.conf"
+        log_info "Then restart:    sudo systemctl restart $SERVICE_NAME"
+        return
     fi
 
     cat << 'EOF'
@@ -398,19 +494,19 @@ To set up Telegram notifications, you need:
 
 EOF
 
-    read -rp "Configure Telegram now? (y/n): " configure_now
+    ask "Configure Telegram now? (y/n): " configure_now "n"
 
     if [[ "$configure_now" =~ ^[Yy]$ ]]; then
-        read -rp "Enter your Telegram Bot Token: " bot_token
-        read -rp "Enter your Telegram Chat ID: " chat_id
+        ask "Enter your Telegram Bot Token: " bot_token ""
+        ask "Enter your Telegram Chat ID: " chat_id ""
 
         if [[ -n "$bot_token" ]] && [[ -n "$chat_id" ]]; then
-            sed -i "s|^TELEGRAM_BOT_TOKEN=.*|TELEGRAM_BOT_TOKEN=\"$bot_token\"|" "$CONFIG_DIR/config.conf"
-            sed -i "s|^TELEGRAM_CHAT_ID=.*|TELEGRAM_CHAT_ID=\"$chat_id\"|" "$CONFIG_DIR/config.conf"
+            sed -i "s|^TELEGRAM_BOT_TOKEN=.*|TELEGRAM_BOT_TOKEN=\"$(esc_sed "$bot_token")\"|" "$CONFIG_DIR/config.conf"
+            sed -i "s|^TELEGRAM_CHAT_ID=.*|TELEGRAM_CHAT_ID=\"$(esc_sed "$chat_id")\"|" "$CONFIG_DIR/config.conf"
             log_step "Telegram credentials saved"
 
             echo ""
-            read -rp "Send a test notification? (y/n): " send_test
+            ask "Send a test notification? (y/n): " send_test "n"
             if [[ "$send_test" =~ ^[Yy]$ ]]; then
                 run_test
             fi
@@ -437,7 +533,7 @@ cmd_install() {
 
     if check_installed; then
         log_warn "Existing installation detected. Use 'update' to update or 'uninstall' first."
-        read -rp "Continue with fresh install anyway? (y/n): " continue_install
+        ask "Continue with fresh install anyway? (y/n): " continue_install "n"
         [[ "$continue_install" =~ ^[Yy]$ ]] || exit 0
     fi
 
@@ -575,9 +671,9 @@ cmd_uninstall() {
     clear_caches
     rm -f /var/run/connection-monitor-handler.pid
 
-    # Ask about config and data
+    # Ask about config and data (default: keep, for safety in non-interactive runs)
     echo ""
-    read -rp "Remove configuration and logs? (y/n): " remove_data
+    ask "Remove configuration and logs? (y/n): " remove_data "n"
     if [[ "$remove_data" =~ ^[Yy]$ ]]; then
         rm -rf "$CONFIG_DIR"
         rm -rf "$LIB_DIR"
@@ -675,11 +771,11 @@ print_summary() {
     echo "  • Configuration:  $CONFIG_DIR/config.conf"
     echo "  • Service:        $SERVICE_NAME.service"
     echo ""
-    echo "Commands:"
-    echo "  • Test:           sudo $MONITOR_SCRIPT test"
-    echo "  • Status:         sudo ./install.sh status"
-    echo "  • Update:         sudo ./install.sh update"
-    echo "  • Uninstall:      sudo ./install.sh uninstall"
+    echo "Manage:"
+    echo "  • Test:       sudo $MONITOR_SCRIPT test"
+    echo "  • Status:     sudo systemctl status $SERVICE_NAME"
+    echo "  • Update:     curl -fsSL $GITHUB_RAW_URL/install.sh | sudo bash -s update"
+    echo "  • Uninstall:  curl -fsSL $GITHUB_RAW_URL/install.sh | sudo bash -s uninstall"
     echo ""
     echo "Logs:"
     echo "  • Notifications:  tail -f /var/log/connection-monitor.log"
@@ -698,6 +794,14 @@ print_usage() {
     echo "  test        Test Telegram notification"
     echo "  status      Show installation status"
     echo "  help        Show this help"
+    echo ""
+    echo "Remote (no checkout needed):"
+    echo "  curl -fsSL $GITHUB_RAW_URL/install.sh | sudo bash"
+    echo "  curl -fsSL $GITHUB_RAW_URL/install.sh | sudo bash -s update"
+    echo ""
+    echo "Non-interactive environment variables:"
+    echo "  TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID   Preconfigure credentials"
+    echo "  ASSUME_YES=true                        Skip all prompts"
     echo ""
 }
 
