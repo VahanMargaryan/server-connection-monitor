@@ -287,6 +287,63 @@ assert_eq "ASSUME_YES=true -> default, no prompt" "THEDEFAULT" "$(ask_run 'ASSUM
 assert_eq "no tty -> falls back to default"       "THEDEFAULT" "$(ask_run 'ASSUME_YES=false')"
 
 #===============================================================================
+section "install.sh console-login monitoring (MONITOR_CONSOLE)"
+#===============================================================================
+# console_monitoring_enabled: env override wins, then config file, else off.
+cme_run() { # $1=ENV_MONITOR_CONSOLE  $2=config value ("none" = no config file)
+    local cdir; cdir="$(mktemp -d -p "$TMP")"
+    [[ "$2" != none ]] && printf 'MONITOR_CONSOLE=%q\n' "$2" > "$cdir/config.conf"
+    {
+        extract "$INSTALL" console_monitoring_enabled
+        printf 'ENV_MONITOR_CONSOLE=%q\n' "$1"
+        printf 'CONFIG_DIR=%q\n' "$cdir"
+        printf 'if console_monitoring_enabled; then echo ON; else echo OFF; fi\n'
+    } | /bin/bash
+}
+assert_eq "env true -> enabled"                "ON"  "$(cme_run true none)"
+assert_eq "env false -> disabled"              "OFF" "$(cme_run false none)"
+assert_eq "config true (no env) -> enabled"    "ON"  "$(cme_run '' true)"
+assert_eq "config false (no env) -> disabled"  "OFF" "$(cme_run '' false)"
+assert_eq "default (no env/config) -> disabled" "OFF" "$(cme_run '' none)"
+
+# add_pam_hook: appends the pam_exec line, idempotently, only to existing files.
+aph="$( {
+    f="$(mktemp -p "$TMP")"; printf 'session required pam_unix.so\n' > "$f"
+    extract "$INSTALL" add_pam_hook
+    printf 'INSTALL_DIR=/usr/local/bin; MONITOR_SCRIPT=connection-monitor\n'
+    printf 'add_pam_hook %q >/dev/null; add_pam_hook %q >/dev/null\n' "$f" "$f"
+    printf 'grep -c "pam_exec.so seteuid /usr/local/bin/connection-monitor notify" %q\n' "$f"
+  } | /bin/bash )"
+assert_eq "add_pam_hook adds the hook exactly once (idempotent)" "1" "$aph"
+
+aph_missing="$( {
+    extract "$INSTALL" add_pam_hook
+    printf 'INSTALL_DIR=/x; MONITOR_SCRIPT=cm\n'
+    printf 'add_pam_hook /no/such/pam/file; echo "rc=$?"\n'
+  } | /bin/bash )"
+assert_contains "add_pam_hook returns nonzero for a missing file" "$aph_missing" "rc=1"
+
+# End-to-end: real configure_pam against a throwaway pam.d (PAMD_DIR override).
+cfgpam_run() { # $1 = ENV_MONITOR_CONSOLE -> "sshd=N login=M"
+    local pd; pd="$(mktemp -d -p "$TMP")"
+    printf 'session required pam_unix.so\n' > "$pd/sshd"
+    printf 'session required pam_unix.so\n' > "$pd/login"
+    {
+        extract "$INSTALL" console_monitoring_enabled
+        extract "$INSTALL" add_pam_hook
+        extract "$INSTALL" remove_pam_entries
+        extract "$INSTALL" configure_pam
+        printf 'log_info(){ :; }; log_step(){ :; }; log_warn(){ :; }\n'
+        printf 'INSTALL_DIR=/usr/local/bin; MONITOR_SCRIPT=connection-monitor\n'
+        printf 'CONFIG_DIR=%q; ENV_MONITOR_CONSOLE=%q; PAMD_DIR=%q\n' "$pd" "$1" "$pd"
+        printf 'configure_pam >/dev/null 2>&1\n'
+        printf 'echo "sshd=$(grep -c connection-monitor %q/sshd) login=$(grep -c connection-monitor %q/login)"\n' "$pd" "$pd"
+    } | /bin/bash
+}
+assert_eq "configure_pam off: sshd hooked, login untouched" "sshd=1 login=0" "$(cfgpam_run false)"
+assert_eq "configure_pam on:  sshd + login both hooked"     "sshd=1 login=1" "$(cfgpam_run true)"
+
+#===============================================================================
 section "Optional: shellcheck"
 #===============================================================================
 if command -v shellcheck >/dev/null 2>&1; then

@@ -53,6 +53,12 @@ IGNORED_SERVICES="cron crond sudo su su-l runuser runuser-l systemd-user polkit-
 # Set to "false" to alert only on genuine remote (network) connections.
 NOTIFY_LOCAL="true"
 
+# Also monitor console / serial logins (e.g. Proxmox xterm.js, physical console)
+# by hooking the `login` PAM service in addition to sshd. These logins have no
+# remote IP, so they appear as "Local Console Login" from "Local/Unknown".
+# Re-run the installer (install/update) after changing this so PAM is updated.
+MONITOR_CONSOLE="false"
+
 #-------------------------------------------------------------------------------
 # BEHAVIOR OPTIONS
 #-------------------------------------------------------------------------------

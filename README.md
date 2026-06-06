@@ -63,6 +63,7 @@ EXCLUDED_USERS="backup"      # users to never alert on (space-separated)
 EXCLUDED_IPS="10.0.0.1"      # IPs to never alert on (space-separated)
 IGNORED_SERVICES="cron sudo su systemd-user ..."  # PAM services that never alert
 NOTIFY_LOCAL="true"          # false = alert only on remote (network) logins
+MONITOR_CONSOLE="false"      # true = also alert on console/serial logins (see below)
 DEDUP_WINDOW="10"            # seconds to suppress duplicate alerts
 GEO_LOOKUP="true"            # IP geolocation
 DEBUG="false"
@@ -71,6 +72,26 @@ DEBUG="false"
 `IGNORED_SERVICES` and `NOTIFY_LOCAL` suppress false positives from cron jobs,
 privilege escalation and local console/TTY sessions. After editing, run
 `sudo systemctl restart connection-monitor-handler`.
+
+### Console / serial logins (Proxmox xterm.js, physical console)
+
+By default only SSH is monitored. Console and serial logins (the Proxmox
+**xterm.js** console for LXC/VMs, or a physical console) go through the `login`
+PAM service instead of `sshd`. Set **`MONITOR_CONSOLE="true"`** to also hook
+`/etc/pam.d/login` — then **re-run the installer** so PAM is updated:
+
+```bash
+# enable on a fresh install (also works unattended)
+curl -fsSL https://raw.githubusercontent.com/VahanMargaryan/server-connection-monitor/main/install.sh | sudo MONITOR_CONSOLE=true bash
+# or, after setting MONITOR_CONSOLE="true" in config.conf on an existing install:
+sudo ./install.sh update
+```
+
+These logins have no network source, so they show as **Local Console Login**
+from `Local/Unknown` (the connecting IP is only known to the Proxmox host, not
+the guest). Requires `NOTIFY_LOCAL="true"`. For a VM, xterm.js also needs a
+serial console configured (`qm set <vmid> -serial0 socket` +
+`systemctl enable --now serial-getty@ttyS0`).
 
 ## Example alert
 

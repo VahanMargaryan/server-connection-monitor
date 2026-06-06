@@ -64,6 +64,9 @@ readonly SERVICE_NAME="connection-monitor-handler"
 # (sourcing would otherwise overwrite these with the empty template values).
 ENV_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-}"
 ENV_CHAT_ID="${TELEGRAM_CHAT_ID:-}"
+# MONITOR_CONSOLE=true also hooks the `login` PAM service so console / serial
+# logins (e.g. Proxmox xterm.js) are reported, not just SSH.
+ENV_MONITOR_CONSOLE="${MONITOR_CONSOLE:-}"
 # ASSUME_YES=true (or no terminal available) skips all interactive prompts.
 ASSUME_YES="${ASSUME_YES:-false}"
 
@@ -304,6 +307,10 @@ IGNORED_SERVICES="cron crond sudo su su-l runuser runuser-l systemd-user polkit-
 # Notify on local sessions with no remote IP (console / TTY logins); false = remote only
 NOTIFY_LOCAL="true"
 
+# Also alert on console/serial logins (Proxmox xterm.js, physical console) by
+# hooking the `login` PAM service. Re-run the installer after changing this.
+MONITOR_CONSOLE="false"
+
 # Deduplication window in seconds (prevents duplicate notifications)
 DEDUP_WINDOW="10"
 
@@ -315,38 +322,69 @@ DEBUG="false"
 EOF
     fi
 
+    # Persist a non-interactive console-monitoring choice into the new config
+    if [[ -n "$ENV_MONITOR_CONSOLE" ]]; then
+        sed -i "s|^MONITOR_CONSOLE=.*|MONITOR_CONSOLE=\"$(esc_sed "$ENV_MONITOR_CONSOLE")\"|" "$CONFIG_DIR/config.conf"
+    fi
+
     chmod 600 "$CONFIG_DIR/config.conf"
     log_step "Configuration file created at $CONFIG_DIR/config.conf"
 }
 
+# True when console / serial login monitoring is enabled (MONITOR_CONSOLE=true),
+# taking the environment override first, then the config file, else off.
+console_monitoring_enabled() {
+    local v="$ENV_MONITOR_CONSOLE"
+    if [[ -z "$v" ]] && [[ -f "$CONFIG_DIR/config.conf" ]]; then
+        v=$(source "$CONFIG_DIR/config.conf" 2>/dev/null; printf '%s' "${MONITOR_CONSOLE:-}")
+    fi
+    [[ "${v:-false}" == "true" ]]
+}
+
+# Append the pam_exec hook to a PAM service file. Idempotent; backs up first.
+# Returns non-zero if the file does not exist.
+add_pam_hook() {
+    local file="$1"
+    [[ -f "$file" ]] || return 1
+    if grep -q "$MONITOR_SCRIPT" "$file" 2>/dev/null; then
+        return 0  # already hooked
+    fi
+    cp "$file" "$file.backup.$(date +%Y%m%d%H%M%S)" 2>/dev/null || true
+    {
+        echo ""
+        echo "# Connection Monitor - Telegram notifications"
+        echo "session optional pam_exec.so seteuid $INSTALL_DIR/$MONITOR_SCRIPT notify"
+    } >> "$file"
+    return 0
+}
+
 configure_pam() {
     log_info "Configuring PAM..."
-
-    local pam_line="session optional pam_exec.so seteuid $INSTALL_DIR/$MONITOR_SCRIPT notify"
-    local pam_sshd="/etc/pam.d/sshd"
+    local pamd="${PAMD_DIR:-/etc/pam.d}"
 
     # Remove any existing entries first (clean slate)
     remove_pam_entries
 
-    if [[ -f "$pam_sshd" ]]; then
-        # Backup
-        cp "$pam_sshd" "$pam_sshd.backup.$(date +%Y%m%d%H%M%S)"
-
-        # Add entry
-        {
-            echo ""
-            echo "# Connection Monitor - Telegram notifications"
-            echo "$pam_line"
-        } >> "$pam_sshd"
-
+    if add_pam_hook "$pamd/sshd"; then
         log_step "PAM configured for SSH monitoring"
     else
-        log_warn "PAM sshd file not found at $pam_sshd"
+        log_warn "PAM sshd file not found at $pamd/sshd"
+    fi
+
+    # Console / serial logins (Proxmox xterm.js, physical console) go through the
+    # `login` PAM service, not sshd. Hook it only when explicitly enabled.
+    if console_monitoring_enabled; then
+        if add_pam_hook "$pamd/login"; then
+            log_step "PAM configured for console/serial login monitoring"
+        else
+            log_warn "PAM login file not found at $pamd/login"
+        fi
     fi
 }
 
 remove_pam_entries() {
-    local pam_files=("/etc/pam.d/sshd" "/etc/pam.d/common-session" "/etc/pam.d/login")
+    local pamd="${PAMD_DIR:-/etc/pam.d}"
+    local pam_files=("$pamd/sshd" "$pamd/common-session" "$pamd/login")
 
     for pam_file in "${pam_files[@]}"; do
         if [[ -f "$pam_file" ]] && grep -q "connection-monitor" "$pam_file" 2>/dev/null; then
@@ -802,6 +840,7 @@ print_usage() {
     echo "Non-interactive environment variables:"
     echo "  TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID   Preconfigure credentials"
     echo "  ASSUME_YES=true                        Skip all prompts"
+    echo "  MONITOR_CONSOLE=true                   Also monitor console/serial logins"
     echo ""
 }
 
