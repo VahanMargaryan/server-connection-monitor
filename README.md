@@ -6,7 +6,7 @@ unblock an IP and kick a user straight from your phone.
 ## Features
 
 - Instant alert on every connection — SSH, tunnels, rsync, SCP/SFTP, console
-- Inline buttons: **Block IP · Unblock IP · Kick User · Show Active Sessions**
+- Inline buttons: **Block IP** (kicks + bans) **· Unblock IP · Kick User · Show Active Sessions**
 - IP geolocation, multi-server support, `iptables` / `hosts.deny` / `fail2ban` integration
 - Noise control: ignores `cron`/`sudo`/`su`/`systemd` sessions, optional remote-only mode
 
@@ -87,7 +87,9 @@ privilege escalation and local console/TTY sessions. After editing, run
 
 A PAM hook in `/etc/pam.d/sshd` runs the monitor on each login and sends the
 alert. A small systemd daemon long-polls Telegram and executes button actions as
-root — block/unblock via `iptables` + `hosts.deny` + `fail2ban`, kick via
+root — **Block IP** first disconnects the client's active sessions (an iptables
+DROP alone won't tear down an already-established connection) then bans it via
+`iptables` + `hosts.deny` + `fail2ban`; **Kick User** ends a user's sessions via
 `loginctl`. For multiple servers, give each a unique `SERVER_NAME` and reuse the
 same bot/chat; actions are routed back to the correct host.
 

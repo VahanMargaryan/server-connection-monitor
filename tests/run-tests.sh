@@ -120,6 +120,38 @@ assert_contains     "remote session uses SSH icon" "$GAS" "🔑 #c1"
 assert_contains     "total = 1 interactive + 3 ssh" "$GAS" "Total: 4 active"
 
 #===============================================================================
+section "kick_ip (Block also terminates sessions from the IP)"
+#===============================================================================
+kick_ip_run() { # $1 = ip
+    {
+        printf 'set -o pipefail\n'
+        extract "$CB" kick_ip
+        cat <<'STUBS'
+log(){ :; }
+command(){ [[ "${2:-}" == loginctl ]] && return 0; builtin command "$@"; }
+loginctl(){
+  case "$1" in
+    list-sessions)     printf '%s\n' '10 1000 alice seat0 pts/0 active no -' '20 1001 bob - pts/1 active no -' ;;
+    show-session)      case "$2" in 10) echo 1.2.3.4 ;; 20) echo 9.9.9.9 ;; esac ;;
+    terminate-session) echo "TERM $2" ;;
+  esac
+}
+ss(){ printf '%s\n' 'ESTAB 0 0 10.0.0.1:22 1.2.3.4:55000 users:(("sshd",pid=4242,fd=4))'; }
+kill(){ echo "KILL $*"; }
+STUBS
+        printf 'kick_ip %q; echo "rc=$?"\n' "$1"
+    } | /bin/bash
+}
+KI="$(kick_ip_run 1.2.3.4)"
+assert_contains     "terminates logind session with matching RemoteHost" "$KI" "TERM 10"
+assert_not_contains "leaves session with different RemoteHost"           "$KI" "TERM 20"
+assert_contains     "kills sshd process whose peer is the IP"            "$KI" "KILL -9 4242"
+assert_contains     "reports success when something was terminated"      "$KI" "rc=0"
+KI_LO="$(kick_ip_run 127.0.0.1)"
+assert_not_contains "refuses loopback (no terminate)"                    "$KI_LO" "TERM"
+assert_contains     "refuses loopback (rc=1)"                            "$KI_LO" "rc=1"
+
+#===============================================================================
 section "connection-monitor alert builds valid JSON (AT&T case)"
 #===============================================================================
 {

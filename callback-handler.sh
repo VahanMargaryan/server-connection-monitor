@@ -321,6 +321,51 @@ kick_user() {
     fi
 }
 
+# Terminate every active session/connection originating from an IP, regardless
+# of user. Used by the Block action so the client is disconnected immediately —
+# an iptables DROP rule does not tear down already-ESTABLISHED connections.
+# Best-effort; returns 0 if anything was terminated.
+kick_ip() {
+    local ip="$1"
+    local kicked=0
+
+    # Never act on local/unknown or loopback addresses
+    if [[ -z "$ip" ]] || [[ "$ip" == "Local/Unknown" ]] || \
+       [[ "$ip" =~ ^127\. ]] || [[ "$ip" == "::1" ]]; then
+        return 1
+    fi
+
+    log "INFO" "Kicking active sessions from IP: $ip"
+
+    # Method 1: gracefully terminate logind sessions whose remote host is the IP
+    if command -v loginctl &>/dev/null; then
+        local sid rhost
+        while read -r sid _; do
+            [[ "$sid" =~ ^[a-zA-Z0-9]+$ ]] || continue
+            rhost=$(loginctl show-session "$sid" -p RemoteHost --value 2>/dev/null)
+            if [[ -n "$rhost" ]] && [[ "$rhost" == "$ip" ]]; then
+                if loginctl terminate-session "$sid" 2>/dev/null; then
+                    log "INFO" "Terminated session $sid (RemoteHost=$ip)"
+                    ((kicked++))
+                fi
+            fi
+        done < <(loginctl list-sessions --no-legend 2>/dev/null)
+    fi
+
+    # Method 2: kill sshd connection processes whose peer is the IP (covers
+    # tunnels/SFTP without a logind session, or a DNS-named RemoteHost)
+    local pids pid
+    pids=$(ss -tnp 2>/dev/null | grep -F "$ip" | grep sshd | grep -oP 'pid=\K[0-9]+' | sort -u)
+    for pid in $pids; do
+        if kill -9 "$pid" 2>/dev/null; then
+            log "INFO" "Killed sshd process $pid (peer $ip)"
+            ((kicked++))
+        fi
+    done
+
+    [[ $kicked -gt 0 ]]
+}
+
 get_active_sessions() {
     local ssh_port="${SSH_PORT:-22}"
     local output=""
@@ -552,19 +597,30 @@ process_callback() {
                 return 0
             fi
 
+            # Kick active sessions from this IP first, then block it: an iptables
+            # DROP rule does not tear down already-ESTABLISHED connections, so the
+            # client must be disconnected explicitly to take effect immediately.
+            local kicked_note=""
+            if kick_ip "$ip"; then
+                kicked_note="
+👢 Active sessions terminated"
+            fi
+
             local exit_code=0
             block_ip "$ip" || exit_code=$?
 
             case $exit_code in
                 0)
-                    answer_callback_query "$callback_query_id" "IP $ip blocked on $SERVER_NAME" true
+                    local block_toast="IP $ip blocked on $SERVER_NAME"
+                    [[ -n "$kicked_note" ]] && block_toast="IP $ip kicked & blocked on $SERVER_NAME"
+                    answer_callback_query "$callback_query_id" "$block_toast" true
                     # Raw $ip in callback_data; HTML-escaped copy for the message
                     local unblock_keyboard="{\"inline_keyboard\":[[{\"text\":\"✅ Unblock IP\",\"callback_data\":\"unblock:$ip:$SERVER_NAME\"}]]}"
                     html_escape "$ip"
                     send_message_with_keyboard "🚫 <b>IP Blocked</b>
 
 🖥️ Server: <code>$SERVER_NAME</code>
-📡 IP: <code>$_ESC</code>
+📡 IP: <code>$_ESC</code>${kicked_note}
 🕐 Time: $(date '+%Y-%m-%d %H:%M:%S')
 👤 By: User $from_id" "$unblock_keyboard"
                     ;;
